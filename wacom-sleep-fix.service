@@ -1,0 +1,16 @@
+[Unit]
+Description=Wacom USB HID suspend/resume workaround
+DefaultDependencies=no
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/wacom-sleep-fix pre
+ExecStop=/usr/local/sbin/wacom-sleep-fix post
+TimeoutStartSec=15
+TimeoutStopSec=15
+
+[Install]
+WantedBy=sleep.target

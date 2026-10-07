@@ -1,0 +1,3 @@
+# USB vendor ID and product ID of the Wacom device, as four hexadecimal digits.
+VID=056a
+PID=51dd

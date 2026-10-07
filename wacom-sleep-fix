@@ -1,0 +1,181 @@
+#!/bin/bash
+
+# Work around Wacom USB HID devices that remain enumerated after suspend/resume
+# but stop producing input events.
+
+set -u
+shopt -s nullglob
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TAG="wacom-sleep-fix"
+CONFIG_FILE="/etc/default/wacom-sleep-fix"
+
+# Defaults for the Fujitsu LIFEBOOK U9310X / Wacom AES device.
+VID="056a"
+PID="51dd"
+
+if [[ -r "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
+
+VID="${VID,,}"
+PID="${PID,,}"
+VID_HID="${VID^^}"
+PID_HID="${PID^^}"
+
+log() {
+    logger -t "$TAG" -- "$*"
+}
+
+usb_ready() {
+    local dev
+
+    # Prefer a real USB userspace query when usbutils is installed.
+    if command -v lsusb >/dev/null 2>&1; then
+        lsusb -d "${VID}:${PID}" >/dev/null 2>&1
+        return $?
+    fi
+
+    # Fallback: detect the device through sysfs.
+    for dev in /sys/bus/usb/devices/*; do
+        [[ -r "$dev/idVendor" && -r "$dev/idProduct" ]] || continue
+        if [[ "$(<"$dev/idVendor")" == "$VID" && "$(<"$dev/idProduct")" == "$PID" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+wacom_bound() {
+    local dev
+
+    for dev in /sys/bus/hid/drivers/wacom/*:${VID_HID}:${PID_HID}.*; do
+        [[ -e "$dev" ]] && return 0
+    done
+
+    return 1
+}
+
+unbind_wacom() {
+    local dev id
+    local count=0
+
+    [[ -d /sys/bus/hid/drivers/wacom ]] || {
+        log "wacom HID driver directory is not present"
+        return 0
+    }
+
+    for dev in /sys/bus/hid/drivers/wacom/*:${VID_HID}:${PID_HID}.*; do
+        [[ -e "$dev" ]] || continue
+        id="${dev##*/}"
+
+        log "unbinding HID device $id"
+        if printf '%s' "$id" > /sys/bus/hid/drivers/wacom/unbind; then
+            count=$((count + 1))
+        else
+            log "WARNING: failed to unbind $id"
+        fi
+    done
+
+    log "unbound $count Wacom HID interface(s)"
+}
+
+probe_wacom() {
+    local dev id
+
+    [[ -w /sys/bus/hid/drivers_probe ]] || return 0
+
+    for dev in /sys/bus/hid/devices/*:${VID_HID}:${PID_HID}.*; do
+        [[ -e "$dev" ]] || continue
+        id="${dev##*/}"
+        log "requesting HID reprobe of $id"
+        printf '%s' "$id" > /sys/bus/hid/drivers_probe 2>/dev/null || true
+    done
+}
+
+pre_suspend() {
+    log "PRE: preparing Wacom ${VID}:${PID} for suspend"
+
+    if ! usb_ready; then
+        log "WARNING: USB device ${VID}:${PID} not found"
+    fi
+
+    unbind_wacom
+
+    if lsmod | grep -q '^wacom '; then
+        log "unloading wacom kernel module"
+        if ! modprobe -r wacom; then
+            log "WARNING: unable to unload wacom module"
+        fi
+    else
+        log "wacom module already unloaded"
+    fi
+
+    log "PRE: complete"
+}
+
+post_resume() {
+    local i
+
+    log "POST: system resumed"
+
+    # Wait up to 5 seconds for the USB device to respond again.
+    for ((i=1; i<=20; i++)); do
+        if usb_ready; then
+            log "USB device ${VID}:${PID} responding after attempt $i"
+            break
+        fi
+        sleep 0.25
+    done
+
+    if ! usb_ready; then
+        log "WARNING: USB device ${VID}:${PID} did not become responsive"
+    fi
+
+    log "loading wacom kernel module"
+    if ! modprobe wacom; then
+        log "ERROR: modprobe wacom failed"
+        return 0
+    fi
+
+    # Give normal HID driver matching a chance first.
+    for ((i=1; i<=20; i++)); do
+        if wacom_bound; then
+            log "Wacom HID driver rebound normally after attempt $i"
+            log "POST: complete"
+            return 0
+        fi
+        sleep 0.10
+    done
+
+    # If normal matching did not happen, request another HID probe.
+    log "Wacom did not bind automatically; requesting HID reprobe"
+    probe_wacom
+
+    for ((i=1; i<=20; i++)); do
+        if wacom_bound; then
+            log "Wacom HID driver rebound after forced reprobe"
+            log "POST: complete"
+            return 0
+        fi
+        sleep 0.10
+    done
+
+    log "ERROR: Wacom HID device exists but driver did not rebind"
+    return 0
+}
+
+case "${1:-}" in
+    pre)
+        pre_suspend
+        ;;
+    post)
+        post_resume
+        ;;
+    *)
+        echo "Usage: $0 {pre|post}" >&2
+        exit 2
+        ;;
+esac
