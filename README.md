@@ -7,7 +7,7 @@ Created by ChatGPT.
 This was tested for the Wacom AES digitizer in a Fujitsu LIFEBOOK U9310X, where the device is still visible after resume but `evtest` receives no pen or touch events. Other HID devices continue to work and the kernel log may contain no obvious error.
 
 > [!NOTE]
-> This is a different bug from the Lenovo Yoga 12, where after suspend the device where not recognized
+> This is a different bug from the Lenovo Yoga 12, where after suspend the device was not recognized
 and reloading the `wacom` kernel module was enough.
 
 The workaround unbinds the matching Wacom HID interfaces and unloads the `wacom` kernel module before suspend. After resume it waits for the USB device to respond, reloads the module, and verifies that the HID driver binds again.
